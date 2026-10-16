@@ -1,0 +1,177 @@
+# =============================================================================
+# CI/CD pipeline — articles-api
+#
+#   test ──┐
+#          ├──► build-and-push (GHCR)
+#   lint ──┘
+#
+# - Every push on the working branches runs tests, then builds the Docker image
+#   and publishes it to the GitHub Container Registry (ghcr.io).
+# - Pull requests run the same checks and build the image without pushing it.
+# - Registry authentication uses the predefined GITHUB_TOKEN: no secret to
+#   create or rotate.
+# =============================================================================
+name: CI/CD
+
+on:
+  push:
+    branches: [devops, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per ref at a time; a newer push supersedes an in-flight run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; jobs elevate only what they need
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Integration tests against a throwaway PostgreSQL service container
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: articles_test
+          POSTGRES_USER: article
+          POSTGRES_PASSWORD: article
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U article -d articles_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: articles_test
+      DB_USER: article
+      DB_PASSWORD: article
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Dockerfile best-practice linting
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint Dockerfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  # ---------------------------------------------------------------------------
+  # Build the image and publish it to GHCR
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: Build & push image
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with GITHUB_TOKEN
+
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # GHCR requires lowercase repository names
+      - name: Compute image name
+        id: image
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: branch name, immutable commit SHA, `latest` on the default branch
+      # Labels: OCI metadata (source, revision, created...) linking the
+      # package to this repository
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Publish summary
+        run: |
+          {
+            echo "### Docker image"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.image.outputs.name }}\` |"
+            echo "| Digest | \`${{ steps.build.outputs.digest }}\` |"
+            echo "| Pushed | ${{ github.event_name != 'pull_request' }} |"
+            echo ""
+            echo "**Tags**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
