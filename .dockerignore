@@ -1,0 +1,33 @@
+# Keep the build context small and free of secrets / dev-only files.
+
+# Dependencies are installed inside the image from the lockfile
+node_modules/
+
+# Secrets
+.env
+.env.*
+
+# VCS & CI
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose*.yml
+compose*.yml
+
+# Tests, docs and tooling (not needed at runtime)
+tests/
+coverage/
+*.md
+.vscode/
+.idea/
+
+# Misc
+*.log
+*.pdf
+*.rar
+*.zip

@@ -1,0 +1,54 @@
+# =============================================================================
+# articles-api — full stack (API + PostgreSQL)
+#
+# Local development (builds the image from the Dockerfile):
+#   docker compose up -d --build
+#
+# Deployment from the registry (used by the CI `deploy` job):
+#   API_IMAGE=ghcr.io/<owner>/<repo>@sha256:... docker compose up -d --no-build
+#
+# Values are read from the shell environment or a local `.env` file, with
+# safe development defaults. See .env.example.
+# =============================================================================
+name: articles-api
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-articles_db}
+      POSTGRES_USER: ${DB_USER:-article}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-article}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      # Bound to localhost only — handy for `npm test` / `npm run dev`
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ${API_IMAGE:-articles-api:local}
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-articles_db}
+      DB_USER: ${DB_USER:-article}
+      DB_PASSWORD: ${DB_PASSWORD:-article}
+    ports:
+      - "${API_PORT:-3000}:3000"
+
+volumes:
+  db-data:

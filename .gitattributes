@@ -1,0 +1,10 @@
+# Normalize line endings: store LF in the repository and check out LF
+# everywhere so that Dockerfiles, YAML and shell snippets behave the same
+# on Windows, macOS and Linux runners.
+* text=auto eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
