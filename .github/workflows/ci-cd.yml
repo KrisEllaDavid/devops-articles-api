@@ -2,11 +2,13 @@
 # CI/CD pipeline — articles-api
 #
 #   test ──┐
-#          ├──► build-and-push (GHCR)
+#          ├──► build-and-push (GHCR) ──► deploy (runner)
 #   lint ──┘
 #
 # - Every push on the working branches runs tests, then builds the Docker image
 #   and publishes it to the GitHub Container Registry (ghcr.io).
+# - The deploy job pulls that exact image (by digest) and runs the stack with
+#   docker compose on the runner, then smoke-tests it.
 # - Pull requests run the same checks and build the image without pushing it.
 # - Registry authentication uses the predefined GITHUB_TOKEN: no secret to
 #   create or rotate.
@@ -174,4 +176,97 @@ jobs:
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Deploy & run the published image on the runner
+  #
+  # Target runner is chosen with the repository variable DEPLOY_RUNS_ON
+  # (a JSON value), e.g. ["self-hosted","linux"] for a local self-hosted
+  # runner with Docker. When unset, it falls back to a GitHub-hosted runner
+  # (ephemeral deployment, useful to validate the release end to end).
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to runner
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ fromJSON(vars.DEPLOY_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      packages: read # pull the image from ghcr.io with GITHUB_TOKEN
+
+    environment:
+      name: local
+      url: http://localhost:${{ vars.API_PORT || '3000' }}
+
+    # Never run two deployments on the same runner at once
+    concurrency:
+      group: deploy-local
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      API_IMAGE: ${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}
+      API_PORT: ${{ vars.API_PORT || '3000' }}
+      DB_HOST_PORT: ${{ vars.DB_HOST_PORT || '5432' }}
+      # Falls back to the compose default when the secret is not defined
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
+    steps:
+      # Only the compose file is needed on the runner
+      - name: Checkout compose file
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: docker-compose.yml
+          sparse-checkout-cone-mode: false
+
+      # Credentials are removed automatically in the post-job step (logout: true)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image
+        run: docker compose pull api
+
+      - name: Start stack
+        run: |
+          docker compose up -d --no-build --remove-orphans \
+            --wait --wait-timeout 120
+          docker compose ps
+
+      - name: Smoke test
+        run: |
+          base_url="http://localhost:${API_PORT}"
+
+          echo "GET /health"
+          curl -fsS --retry 10 --retry-connrefused --retry-delay 3 \
+            "${base_url}/health"
+          echo
+
+          echo "GET /articles"
+          curl -fsS "${base_url}/articles"
+          echo
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### Deployment"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Runner | \`${RUNNER_NAME}\` (${RUNNER_OS}) |"
+            echo "| Image | \`${API_IMAGE}\` |"
+            echo "| URL | http://localhost:${API_PORT} |"
           } >> "$GITHUB_STEP_SUMMARY"
