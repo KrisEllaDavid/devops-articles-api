@@ -5,7 +5,7 @@
 #
 # Multi-stage build:
 #   1. deps    : installs production dependencies only, from the lockfile
-#   2. runtime : minimal Alpine image running as the unprivileged `node` user
+#   2. runtime : minimal Alpine image running as the unprivileged `node` user (UID 1000)
 # =============================================================================
 
 ARG NODE_VERSION=22
@@ -38,8 +38,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
 
-# Drop root privileges
-USER node
+# Drop root privileges: built-in `node` user, referenced by numeric UID/GID so
+# that runtimes (e.g. Kubernetes runAsNonRoot) can verify it is not root
+USER 1000:1000
 
 EXPOSE 3000
 
